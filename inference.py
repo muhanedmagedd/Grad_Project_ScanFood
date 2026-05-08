@@ -21,8 +21,8 @@ FOOD_INFO = {
 }
 
 # ── Models (loaded once at startup) ──────────────────────────────────────────
-_yolo  = None
-_midas = None
+_yolo      = None
+_midas     = None
 _transform = None
 _device    = None
 
@@ -31,7 +31,7 @@ def load_models():
 
     _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    yolo_path = os.environ.get("YOLO_WEIGHTS", "weights/best.pt")
+    yolo_path = os.path.join(os.path.dirname(__file__), "best.pt")
     _yolo = YOLO(yolo_path)
 
     _midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True)
@@ -65,21 +65,6 @@ def _resize_mask(mask, target_hw):
     )
 
 
-def calc_depth_scale(coin_mask, depth_map):
-    """
-    Use the coin as a real-world reference to convert MiDaS relative depth
-    into approximate centimetres.
-    Assumption: the coin sits on the same surface as the food (~2 cm above
-    the table when viewed from a typical phone distance).
-    """
-    mask_bool = _resize_mask(coin_mask, depth_map.shape[:2]).astype(bool)
-    coin_depth_relative = float(depth_map[mask_bool].mean())
-    COIN_REFERENCE_DEPTH_CM = 2.0
-    if coin_depth_relative > 1e-6:
-        return COIN_REFERENCE_DEPTH_CM / coin_depth_relative
-    return 5.0   # safe fallback
-
-
 def get_pixel_size_from_coin(coin_mask, target_hw):
     """Return cm-per-pixel using the coin diameter as reference."""
     mask_uint8  = (_resize_mask(coin_mask, target_hw) * 255).astype(np.uint8)
@@ -97,7 +82,9 @@ def get_pixel_size_from_coin(coin_mask, target_hw):
 
 
 # ── Calorie estimation ────────────────────────────────────────────────────────
-def calc_calories(food_name, food_mask, depth_map, pixel_size_cm, depth_scale):
+DEPTH_MULTIPLIER = 5.25   # calibrated constant (replaces dynamic depth_scale)
+
+def calc_calories(food_name, food_mask, depth_map, pixel_size_cm):
     if food_name not in FOOD_INFO:
         print(f"    '{food_name}' not in FOOD_INFO")
         return None
@@ -106,7 +93,7 @@ def calc_calories(food_name, food_mask, depth_map, pixel_size_cm, depth_scale):
     mask_bool = _resize_mask(food_mask, depth_map.shape[:2]).astype(bool)
 
     area_cm2     = mask_bool.sum() * (pixel_size_cm ** 2)
-    avg_depth_cm = float(depth_map[mask_bool].mean()) * depth_scale
+    avg_depth_cm = float(depth_map[mask_bool].mean()) * DEPTH_MULTIPLIER
     avg_depth_cm = max(1.0, min(avg_depth_cm, 10.0))   # clamp to sane range
 
     volume_cm3 = area_cm2 * avg_depth_cm
@@ -129,16 +116,17 @@ def predict(image_bgr):
         image_bgr: numpy array (H×W×3, BGR) – the raw image.
     Returns:
         dict with keys:
-            "items"          – list of per-food dicts
-            "total_calories" – float
-            "annotated_image"– numpy array (BGR) with YOLO masks drawn
+            "items"           – list of per-food dicts
+            "total_weight_g"  – float
+            "total_calories"  – float
+            "annotated_image" – numpy array (BGR) with YOLO masks drawn
     """
     results     = _yolo.predict(image_bgr, conf=0.25, task="segment", verbose=False)
     result      = results[0]
     class_names = _yolo.names
 
     if result.masks is None:
-        return {"items": [], "total_calories": 0, "annotated_image": image_bgr}
+        return {"items": [], "total_weight_g": 0, "total_calories": 0, "annotated_image": image_bgr}
 
     depth_map = get_depth_map(image_bgr)
     hw        = image_bgr.shape[:2]
@@ -159,6 +147,7 @@ def predict(image_bgr):
     if coin_mask is None:
         return {
             "items": [],
+            "total_weight_g": 0,
             "total_calories": 0,
             "annotated_image": result.plot(),
             "error": "No coin detected – place a 1-pound coin next to the food.",
@@ -168,18 +157,17 @@ def predict(image_bgr):
     if pixel_size_cm is None:
         return {
             "items": [],
+            "total_weight_g": 0,
             "total_calories": 0,
             "annotated_image": result.plot(),
             "error": "Could not measure coin size in image.",
         }
 
-    depth_scale = calc_depth_scale(coin_mask, depth_map)
-
     items          = []
     total_calories = 0.0
 
     for food_name, mask, confidence in food_items:
-        data = calc_calories(food_name, mask, depth_map, pixel_size_cm, depth_scale)
+        data = calc_calories(food_name, mask, depth_map, pixel_size_cm)
         if data:
             total_calories += data["calories"]
             items.append({
@@ -189,8 +177,8 @@ def predict(image_bgr):
             })
 
     return {
-        "items":           items,
-        "total_weight_g": round(sum(item["weight_g"] for item in items), 1)
-        "total_calories":  round(total_calories, 1),
+        "items":          items,
+        "total_weight_g": round(sum(item["weight_g"] for item in items), 1),
+        "total_calories": round(total_calories, 1),
         "annotated_image": result.plot(),   # BGR numpy array
     }
