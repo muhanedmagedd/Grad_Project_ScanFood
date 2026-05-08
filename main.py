@@ -38,10 +38,6 @@ app.add_middleware(
 # ── Response schemas ──────────────────────────────────────────────────────────
 class FoodItem(BaseModel):
     name:       str
-    confidence: float
-    area_cm2:   float
-    depth_cm:   float
-    volume_cm3: float
     weight_g:   float
     calories:   float
 
