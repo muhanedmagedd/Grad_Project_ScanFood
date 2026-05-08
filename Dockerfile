@@ -28,7 +28,7 @@ EOF
 # ── Copy source ───────────────────────────────────────────────────────────────
 COPY inference.py .
 COPY main.py .
-
+COPY best.pt /app/best.pt
 # YOLO weights: mount at runtime  →  docker run -v /path/to/best.pt:/app/weights/best.pt
 # OR copy them into the image (makes image bigger):
 # COPY weights/ weights/
